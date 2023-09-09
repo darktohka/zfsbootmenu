@@ -4,16 +4,18 @@ on:
     branches:
       - master
     paths:
-      - 'bin/**'
-      - 'zfsbootmenu/**'
-      - 'dracut/**'
-      - 'initcpio/**'
+      - "bin/**"
+      - "zfsbootmenu/**"
+      - "dracut/**"
+      - "initcpio/**"
   pull_request:
     paths:
-      - 'bin/**'
-      - 'zfsbootmenu/**'
-      - 'dracut/**'
-      - 'initcpio/**'
+      - "bin/**"
+      - "zfsbootmenu/**"
+      - "dracut/**"
+      - "initcpio/**"
+  workflow_dispatch:
+  repository_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
