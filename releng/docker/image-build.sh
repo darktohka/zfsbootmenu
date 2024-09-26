@@ -122,7 +122,7 @@ fi
 
 # Use default kernel series when nothing was specified
 if [ "${#kern_series[@]}" -lt 1 ]; then
-  kern_series=( "linux5.10" "linux5.15" "linux6.1" )
+  kern_series=( "linux6.10" )
 fi
 
 # Populate the correspoding headers list

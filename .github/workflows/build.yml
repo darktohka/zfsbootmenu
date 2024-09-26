@@ -26,7 +26,7 @@ jobs:
     name: Build boot images
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/zbm-dev/zbm-builder
+      image: docker.io/darktohka/zfsbootmenu-edge:latest
     steps:
       - uses: actions/checkout@master
 
