@@ -70,7 +70,7 @@ Kernel
 
 **CommandLine**
 
-  If you're making a unified EFI file or a syslinux configuration, this is the command line passed to the boot image.
+  If you're making a unified EFI file, this is the command line passed to the boot image.
 
 **Path**
 
@@ -103,17 +103,6 @@ Components
 
   When *true* (which behaves as *1*) or any positive integer, **generate-zbm** will append the value of *Global.Version* to every image it produces, followed by a revision as *_$revision*. **generate-zbm** will save *Components.Versions* revisions of all images with versions matching the current value of *Global.Version*. In addition, **generate-zbm** will save the highest revision of the most recent *Components.Versions* image versions distinct from *Global.Version*.
 
-Components.syslinux
--------------------
-
-**Enabled**
-
-  When *true*, syslinux configuration generation is enabled. The default value is *false*.
-
-**Config**
-
-  The path of the syslinux configuration file to produce.
-
 EFI
 ---
 
@@ -131,7 +120,11 @@ EFI
 
 **Stub**
 
-  The path to the EFI stub loader used to boot the unified bundle. If not set, a default of ``/usr/lib/gummiboot/linuxx64.efi.stub`` is assumed.
+  The path to the EFI stub loader used to boot the unified bundle. If not set, a default of either ``/usr/lib/systemd/boot/efi/linuxx64.efi.stub`` or ``/usr/lib/gummiboot/linuxx64.efi.stub`` is assumed.
+
+**SplashImage**
+
+  The path to a bitmap image file (BMP) to use as a splash image before ZFSBootMenu loads. Only works if using systemd-boot's EFI stub loader. The ZFSBootMenu logo is available in BMP format at ``/usr/share/examples/zfsbootmenu/splash.bmp``.
 
 EXAMPLE
 =======
@@ -148,9 +141,6 @@ The following example will write separate, unversioned ZFSBootMenu kernel and in
     ImageDir: /boot/efi/EFI/zbm
     Versions: false
     Enabled: true
-    syslinux:
-      Config: /boot/syslinux/syslinux.cfg
-      Enabled: false
   EFI:
     ImageDir: /boot/efi/EFI/zbm
     Versions: 2

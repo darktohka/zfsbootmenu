@@ -6,7 +6,7 @@ sources=(
   /lib/profiling-lib.sh
   /etc/zfsbootmenu.conf
   /lib/zfsbootmenu-core.sh
-  /lib/zfsbootmenu-lib.sh
+  /lib/zfsbootmenu-ui.sh
   /lib/kmsg-log-lib.sh
   /etc/profile
   /lib/fzf-defaults.sh
@@ -28,14 +28,19 @@ unset src sources
 mkdir -p "${BASE:=/zfsbootmenu}"
 
 while [ ! -e "${BASE}/initialized" ]; do
-  if ! timed_prompt -d 5 -e "to cancel" \
-    -p "Waiting for ZFSBootMenu initialization"; then
-
-    zdebug "exited while waiting for initialization"
+  if ! timed_prompt -d 0 \
+      -m "$( colorize red "ZFSBootMenu must be initialized to continue" )" \
+      -r "initialize" \
+      -e "abort     "; then
+    zdebug "aborted while waiting for initialization"
     tput cnorm
     tput clear
     exit
   fi
+
+  tput cnorm
+  tput clear
+  [ -e "${BASE}/initialized" ] || /libexec/zfsbootmenu-init
 done
 
 [ -e "${BASE}/active" ] && takeover
@@ -43,8 +48,7 @@ done
 # If the takeover fails for some reason, spin until it ends
 while [ -e "${BASE}/active" ]; do
   if ! timed_prompt -d 1 -e "to cancel" \
-    -p "Waiting for other ZFSBootMenu instance to terminate"; then
-
+      -p "Waiting for other ZFSBootMenu instance to terminate"; then
     zdebug "exited while waiting to own ${BASE}/active"
     tput cnorm
     tput clear
@@ -68,14 +72,8 @@ if [ -r "${BASE}/bootfs" ]; then
 fi
 
 # Run setup hooks, if they exist
-if [ -d /libexec/setup.d ]; then
-  tput clear
-  for _hook in /libexec/setup.d/*; do
-    zinfo "Processing hook: ${_hook}"
-    [ -x "${_hook}" ] && "${_hook}"
-  done
-  unset _hook
-fi
+tput clear
+/libexec/zfsbootmenu-run-hooks "setup.d"
 
 # Clear screen before a possible password prompt
 tput clear
@@ -88,25 +86,19 @@ while true; do
   if [ "${BE_SELECTED}" -eq 0 ]; then
     # Populate the BE list, load any keys as necessary
     # If no BEs were found, remove the empty environment file
-    populate_be_list "${BASE}/bootenvs" || rm -f "${BASE}/bootenvs"
+    if ! populate_be_list "${BASE}/bootenvs" ; then
+      rm -f "${BASE}/bootenvs"
 
-    bootenv="$( draw_be "${BASE}/bootenvs" )"
-    ret=$?
-
-    if [ "${ret}" -eq 130 ]; then
-      # No BEs were found, so print a warning and drop to the emergency shell
       timed_prompt -d 10 \
         -m "$( colorize red "No boot environments with kernels found" )" \
         -m "$( colorize red "Dropping to an emergency shell to allow recovery attempts" )"
       tput clear
       tput cnorm
       exit 1
-    elif [ "${ret}" -ne 0 ]; then
-      # Esc was pressed
-      continue
     fi
 
-    # A selection was made, so split "key,selected_be" pair
+    bootenv="$( draw_be "${BASE}/bootenvs" )" || continue
+
     # shellcheck disable=SC2162
     IFS=, read key selected_be <<<"${bootenv}"
     zdebug "selected key: ${key}"
@@ -137,7 +129,7 @@ while true; do
       zdebug "selected kernel: ${selected_kernel}"
 
       # shellcheck disable=SC2034
-      IFS=' ' read -r fs kpath initrd <<< "${selected_kernel}"
+      IFS=$'\t' read -r fs kpath initrd <<< "${selected_kernel}"
 
       case "${subkey}" in
         "enter")
@@ -289,6 +281,9 @@ while true; do
       ;;
     "mod-o")
       change_sort
+      ;;
+    "mod-x")
+      /libexec/zpowermenu
       ;;
   esac
 done

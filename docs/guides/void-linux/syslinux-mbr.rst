@@ -67,8 +67,8 @@ partitions for boot files as well as the ZFSBootMenu.
 
 .. include:: _include/zfs-config.rst
 
-Install and configure ZFSBootMenu
----------------------------------
+Install and configure syslinux
+------------------------------
 
 Create a ext4 boot filesystem
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -142,9 +142,7 @@ See :doc:`generate-zbm(5) </man/generate-zbm.5>` for more details.
 Configure syslinux
 ~~~~~~~~~~~~~~~~~~
 
-The ``generate-zbm`` image-creation utility includes now-deprecated support for managing a syslinux configuration.
-Because this capability is slated for removal and was not reliable in the first place, it is better to create a static
-syslinux configuration. The ZFSBootMenu configuration described above disables explicit image versioning, which means
+The ZFSBootMenu configuration described above disables explicit image versioning, which means
 that each invocation of ``generate-zbm`` will produce two output files at a predictable location:
 
 * ``/boot/syslinux/zfsbootmenu/vmlinuz-bootmenu``
@@ -171,18 +169,21 @@ images::
     MENU LABEL ZFSBootMenu
     KERNEL /zfsbootmenu/vmlinuz-bootmenu
     INITRD /zfsbootmenu/initramfs-bootmenu.img
-    APPEND zfsbootmenu quiet loglevel=4
+    APPEND zfsbootmenu quiet
 
   LABEL zfsbootmenu-backup
     MENU LABEL ZFSBootMenu (Backup)
     KERNEL /zfsbootmenu/vmlinuz-bootmenu-backup
     INITRD /zfsbootmenu/initramfs-bootmenu-backup.img
-    APPEND zfsbootmenu quiet loglevel=4
+    APPEND zfsbootmenu quiet
   EOF
 
 Consult the `syslinux documentation <https://wiki.syslinux.org/wiki/index.php?title=Config>`_ for more details on the
 contents of the ``syslinux.cfg`` configuration file. To alter the command-line arguments passed to the ZFSBootMenu
 image, adjust the contents of the ``APPEND`` lines in the configuration.
+
+Alternatively, the :zbm:`contrib/syslinux-update.sh` ``generate-zbm`` hook can be used to automatically recreate
+``syslinux.cfg``.
 
 .. include:: _include/gen-initramfs.rst
 

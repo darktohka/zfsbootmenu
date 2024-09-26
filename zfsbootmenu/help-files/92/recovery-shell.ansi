@@ -41,6 +41,10 @@
 
     Mount the filesystem at a unique location and print the mount point.
 
+  [1mmount_esp[0m [33mdevice[0m
+
+    Mount an EFI System Partition at a unique location and print the mount point.
+
   [1mmount_efivarfs[0m [33mmode[0m
 
     Mount or remount [33mefivarfs[0m as read-write or read-only.
@@ -52,3 +56,11 @@
   [1mlogs[0m
 
     View warning/error/debug logs.
+
+  [1mshutdown|poweroff[0m
+
+    Shutdown the system using a SysRq magic invocation.
+
+  [1mreboot[0m
+
+    Reboot the system using a SysRq magic invocation.

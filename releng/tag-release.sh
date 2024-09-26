@@ -24,7 +24,8 @@ if [ ! -e bin/generate-zbm ] || [ ! -e docs/CHANGELOG.md ]; then
 fi
 
 # Only tag releases from master or a compatible release-tracking branch
-case "$(git rev-parse --abbrev-ref HEAD)" in
+release_branch="$(git rev-parse --abbrev-ref HEAD)" || release_branch=""
+case "${release_branch}" in
   master)
     echo "Tagging release from master branch"
     ;;
@@ -75,12 +76,16 @@ if ! out="$( releng/rst2help.sh )" ; then
   error "ERROR: ${out}"
 fi
 
-if ! out="$( cd docs ; make gen-man SPHINXOPTS='-t manpages' )" ; then
+if ! out="$( releng/update-includes.sh )" ; then
   error "ERROR: ${out}"
 fi
 
-if ! out="$( rm -r docs/man/dist/_static )"; then
+if ! out="$( cd docs && make gen-man SPHINXOPTS='-t manpages' )" ; then
   error "ERROR: ${out}"
+fi
+
+if [ -d docs/man/dist/_static ] && ! out="$( rm -r docs/man/dist/_static )"; then
+  error "ERROR: failed to remove docs/man/dist/_static"
 fi
 
 # Generate a short history for CHANGELOG.md
@@ -112,10 +117,16 @@ if ! (head -n 1 "${relnotes}" | grep -q "ZFSBootMenu ${tag}\b"); then
 fi
 
 # Update version in generate-zbm
-sed -i bin/generate-zbm -e "s/our \$VERSION.*/our \$VERSION = '${release}';/"
+if [ ! -x releng/version.sh ]; then
+  error "ERROR: unable to update release version"
+fi
+
+if ! out="$( releng/version.sh -v "${release}" -u )"; then
+  error "ERROR: ${out}"
+fi
 
 # Push updates for the release
-git add bin/generate-zbm docs/ zfsbootmenu/help-files/
+git add bin/generate-zbm docs/ zfsbootmenu/zbm-release zfsbootmenu/help-files/
 git commit -m "Bump to version ${release}"
 
 # Publish release, as prerelease if version contains alphabetics
@@ -135,14 +146,6 @@ assets=()
 if ! releng/make-binary.sh "${release}"; then
   error "ERROR: unable to make release assets, exiting!"
 fi
-
-# Copy in any extra assets/files, relative to the project root
-# shellcheck disable=SC2043
-for extra in bin/zbm-kcl ; do
-  [ -f "${extra}" ] || error "ERROR: missing ${extra}"
-  cp "${extra}" "${asset_dir}/"
-  assets+=( "${extra##*/}" )
-done
 
 # Sign the binary assets
 if ! releng/sign-assets.sh "${release}"; then
@@ -170,13 +173,13 @@ sed -i '1,/^$/d' "${relnotes}"
 
 echo "Release ${release} ready to push and tag"
 while true; do
-  echo "Continue? [Yes]/No"
+  echo "Continue? Yes/[No]"
   read -r response
   case "${response,,}" in
-    yes|y|"")
+    yes|y)
       break
       ;;
-    no|n)
+    no|n|"")
       error "Release aborted by user request; clean up your local branch!"
       ;;
     *)
@@ -190,8 +193,20 @@ if ! git push; then
 fi
 
 if ! gh release create "${tag}" "${prerelease[@]}" \
-    -F "${relnotes}" -t "ZFSBootMenu ${tag}" "${asset_files[@]}"; then
+    --target "${release_branch}" -F "${relnotes}" \
+    -t "ZFSBootMenu ${tag}" "${asset_files[@]}"; then
   error "ERROR: release creation failed"
 fi
 
 echo "Pushed and tagged release ${release}"
+
+# Bump the verson to a development tag
+dver="${release}+dev"
+if ! (
+  releng/version.sh -v "${dver}" -u || exit 1
+  git add bin/generate-zbm zfsbootmenu/zbm-release || exit 1
+  git commit -m "Bump to version ${dver}" || exit 1
+  git push
+); then
+  error "ERROR: failed to update to development version"
+fi

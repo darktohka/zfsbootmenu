@@ -1,12 +1,30 @@
 #!/bin/bash
 # vim: softtabstop=2 shiftwidth=2 expandtab
 
+cleanup() {
+  tput clear
+}
+
 # shellcheck disable=SC1091
-source /lib/profiling-lib.sh >/dev/null 2>&1
-source /etc/zfsbootmenu.conf 2>&1 || exit 1
-source /lib/kmsg-log-lib.sh >/dev/null 2>&1 || exit 1
-source /lib/zfsbootmenu-core.sh >/dev/null 2>&1 || exit 1
-source /lib/zfsbootmenu-lib.sh >/dev/null 2>&1 || exit 1
+sources=(
+  /lib/profiling-lib.sh
+  /etc/zfsbootmenu.conf
+  /lib/kmsg-log-lib.sh
+  /lib/zfsbootmenu-core.sh
+  /lib/zfsbootmenu-ui.sh
+)
+
+for src in "${sources[@]}"; do
+  # shellcheck disable=SC1090
+  if ! source "${src}" >/dev/null 2>&1 ; then
+    echo "<3>ZFSBootMenu: unable to source '${src}' in $0" > /dev/kmsg
+    exit
+  fi
+done
+
+unset src sources
+
+trap cleanup EXIT INT TERM
 
 # zfsbootmenu-help invokes itself, so the value of $WIDTH depends
 # on if $0 is launching fzf (-L) or is being launched inside
@@ -47,7 +65,7 @@ help_pager() {
     ${HAS_BORDER:+--border=top} \
     ${HAS_BORDER:+--color=border:white} \
     ${HAS_BORDER:+--border-label="$( global_header )"} \
-    --tac --inline-info --ansi --layout="reverse-list"
+    --tac --inline-info --ansi --layout="reverse-list" || true
 }
 
 doc_base="/usr/share/docs/help-files"
@@ -68,6 +86,7 @@ fi
 for doc in "${doc_path}"/* ; do
   SECTIONS+=( "${doc} $( head -1 "${doc}" )" )
 done
+SECTIONS+=( "zreport $( colorize white 'System Report' )" )
 
 while getopts "lL:s:" opt; do
   case "${opt}" in
@@ -80,7 +99,11 @@ while getopts "lL:s:" opt; do
       exit
       ;;
     s)
-      cat "${OPTARG}"
+      if [ "${OPTARG}" == "zreport" ]; then
+        /libexec/zfunc zreport
+      else
+        cat "${OPTARG}"
+      fi
       exit
       ;;
     ?)

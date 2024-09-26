@@ -154,13 +154,13 @@ match_hostid() {
         state*)
           state="${line#state: }"
           # shellcheck disable=SC2154
-          if [ "${state}" == "ONLINE" ] && [ -n "${pool}" ] && [ "${pool}" != "${root}" ]; then
+          if [ "${state}" == "ONLINE" ] && [ -n "${pool}" ] && [ "${pool}" != "${zbm_prefer_pool}" ]; then
             importable+=("${pool}")
             pool=""
           fi
           ;;
       esac
-    done <<<"$( zpool import )"
+    done <<<"$( zpool import 2>/dev/null )"
   fi
 
   zdebug "importable pools: ${importable[*]}"
@@ -184,8 +184,10 @@ match_hostid() {
     if read_write='' import_pool "${pool}"; then
       zdebug "successfully imported ${pool}"
 
-      zwarn "imported ${pool} with assumed hostid ${hostid}"
-      zwarn "set spl_hostid=${hostid} on ZBM KCL or regenerate with corrected /etc/hostid"
+      if [ -z "${ZBM_RELEASE_BUILD}" ]; then
+        zwarn "imported ${pool} with assumed hostid ${hostid}"
+        zwarn "set spl_hostid=${hostid} on ZBM KCL or regenerate with corrected /etc/hostid"
+      fi
 
       echo "${pool};${hostid}"
       return 0
@@ -194,6 +196,38 @@ match_hostid() {
 
   # no pools could be imported, we failed to match a hostid
   return 1
+}
+
+# args: no arguments
+# prints: nothing
+# returns: nothing
+
+log_unimportable() {
+  local pool id state line error_line
+
+  while read -r line; do
+    case "${line}" in
+      pool*)
+        pool="${line#pool: }"
+        ;;
+      id*)
+        id="${line#id: }"
+        ;;
+      state*)
+        state="${line#state: }"
+        if [ "${state}" == "UNAVAIL" ]; then
+          while read -r error_line; do
+            zerror "${error_line}"
+          done <<<"$( zpool import -N "${id}" 2>&1 )"
+        fi
+        state=
+        pool=
+        id=
+        ;;
+      *)
+        ;;
+    esac
+  done <<<"$( zpool import 2>/dev/null )"
 }
 
 # args: none
@@ -205,9 +239,52 @@ check_for_pools() {
 
   while read -r pool ; do
     [ -n "${pool}" ] && return 0
-  done <<<"$( zpool list -H -o name )"
+  done <<<"$( zpool list -H -o name 2>/dev/null )"
 
   return 1
+}
+
+# arg1: device name
+# prints: mountpoint
+# returns: 0 on success
+
+mount_block() {
+  local device mnt output
+
+  device="${1}"
+
+  if [ -z "${device}" ]; then
+    zerror "device is undefined"
+    return 1
+  fi
+
+  if [ ! -b "${device}" ]; then
+    zerror "device does not exist or is not a block device"
+    return 1
+  fi
+
+  if mnt="$( is_mounted "${device}" )"; then
+    echo "${mnt}"
+    return 0
+  fi
+
+  mnt="/mnt/${device##*/}"
+
+  if [ -d "${mnt}" ] && is_mountpoint "${mnt}"; then
+    zerror "mountpoint '${mnt}' already in use"
+    return 1
+  fi
+
+  mkdir -p "${mnt}" || return 1
+
+  if output="$( mount "${device}" "${mnt}" 2>&1 )"; then
+    echo "${mnt}"
+    return 0
+  else
+    zerror "unable to mount '${device}' at '${mnt}'"
+    zerror "${output}"
+    return 1
+  fi
 }
 
 # arg1: ZFS filesystem name
@@ -273,7 +350,7 @@ mount_zfs() {
 # returns: 1 on error, otherwise does not return
 
 kexec_kernel() {
-  local selected fs kernel initramfs tdhook output
+  local selected fs kernel initramfs output hook_envs
 
   selected="${1}"
   if [ -z "${selected}" ]; then
@@ -284,7 +361,7 @@ kexec_kernel() {
   # zfs filesystem
   # kernel
   # initramfs
-  IFS=' ' read -r fs kernel initramfs <<<"${selected}"
+  IFS=$'\t' read -r fs kernel initramfs <<<"${selected}"
 
   zdebug "fs: ${fs}, kernel: ${kernel}, initramfs: ${initramfs}"
 
@@ -297,6 +374,18 @@ kexec_kernel() {
     emergency_shell "unable to mount $( colorize cyan "${fs}" )"
     return 1
   fi
+
+  # Variables to tell user hooks what BE has been selected
+  hook_envs=(
+    ZBM_SELECTED_BE="${fs}"
+    ZBM_SELECTED_KERNEL="${kernel}"
+    ZBM_SELECTED_INITRAMFS="${initramfs}"
+  )
+
+  # Run boot-environment hooks, if they exist
+  env "${hook_envs[@]}" \
+    ZBM_SELECTED_MOUNTPOINT="${mnt}" \
+    /libexec/zfsbootmenu-run-hooks "boot-sel.d"
 
   cli_args="$( load_be_cmdline "${fs}" )"
   root_prefix="$( find_root_prefix "${fs}" "${mnt}" )"
@@ -332,15 +421,7 @@ kexec_kernel() {
   done <<<"$( zpool list -H -o name )"
 
   # Run teardown hooks, if they exist
-  if [ -d /libexec/teardown.d ]; then
-    for tdhook in /libexec/teardown.d/*; do
-      [ -x "${tdhook}" ] || continue
-      zinfo "Processing hook: ${tdhook}"
-      env "ZBM_SELECTED_INITRAMFS=${initramfs}" \
-        "ZBM_SELECTED_KERNEL=${kernel}" "ZBM_SELECTED_BE=${fs}" "${tdhook}"
-    done
-    unset tdhook
-  fi
+  env "${hook_envs[@]}" /libexec/zfsbootmenu-run-hooks "teardown.d"
 
   if ! output="$( kexec -e -i 2>&1 )"; then
     zerror "kexec -e -i failed!"
@@ -531,7 +612,7 @@ create_snapshot() {
   load_key "${selected}"
 
   zdebug "creating snapshot ${selected}@${target}"
-  if ! output="$( zfs snapshot "${selected}@${target}" )" ; then
+  if ! output="$( zfs snapshot "${selected}@${target}" 2>&1 )" ; then
     zdebug "unable to create snapshot: ${output}"
     return 1
   fi
@@ -596,7 +677,7 @@ rollback_snapshot() {
   CLEAR_SCREEN=1 load_key "${snap}"
 
   zdebug "will roll back ${snap}"
-  if ! output="$( zfs rollback -r "${snap}" )"; then
+  if ! output="$( zfs rollback -r "${snap}" 2>&1 )"; then
     zerror "failed to roll back snapshot ${snap}"
     zerror "${output}"
     return 1
@@ -629,8 +710,9 @@ set_default_kernel() {
   set_rw_pool "${pool}" || return 1
   CLEAR_SCREEN=1 load_key "${fs}"
 
-  # Strip /boot/ to list only the file
-  kernel="${2#/boot/}"
+  # Strip leading /boot/ or / to list only the file
+  kernel="${2#/}"
+  kernel="${kernel#boot/}"
 
   # Restore nonspecific default when no kernel specified
   if [ -z "$kernel" ]; then
@@ -676,14 +758,82 @@ set_default_env() {
   fi
 }
 
+# arg1: path of the kernel for which the initramfs is sought
+# prints: path of a matching initramfs
+# returns: 0 if initramfs was found, 1 otherwise
+
+find_be_initramfs() {
+  local kpath
+  local kdir kern kver ifile candidates
+
+  kpath="$1"
+  if [ ! -r "${kpath}" ]; then
+    zerror "specified kernel does not exist"
+    return 1
+  fi
+
+  # Split kernel path into file and directory
+  kern="${kpath##*/}"
+  kdir="${kpath%"${kern}"}"
+  kdir="${kdir%/}"
+  zdebug "kernel path: '${kpath}', directory: '${kdir}', file: '${kern}'"
+
+  # Kernel "base" extends to first hyphen, "version" follows and may be empty
+  kver="${kern#"${kern%%-*}"}"
+  zdebug "kernel version: '${kver}'"
+
+  # Try some common cases before doing an exhaustive search
+
+  candidates=(
+    # Void, Arch
+    "initramfs-${kern}.img"
+    "initramfs${kver}.img"
+
+    # Debian and other initramfs-tools users
+    "initrd.img-${kern}"
+    "initrd.img${kver}"
+
+    # Alpine
+    "initramfs-${kern}"
+    "initramfs${kver}"
+  )
+
+  for ifile in "${candidates[@]}"; do
+    if [ -e "${kdir}/${ifile}" ]; then
+      zdebug "short-matching '${ifile}' to '${kern}'"
+      echo "${kdir}/${ifile}"
+      return 0
+    fi
+  done
+
+  # Common cases have failed, try a more exhaustive search
+
+  local ext pfx lbl ifile
+
+  # Use loops instead of a clever brace-expansion for clarity and control
+  for ext in {.img,""}{"",.{gz,bz2,xz,lzma,lz4,lzo,zstd}}; do
+    for pfx in initramfs initrd; do
+      for lbl in "${kern}" "${kver}"; do
+        for ifile in "${pfx}${lbl}${ext}" "${pfx}${ext}${lbl}"; do
+          [ -e "${kdir}/${ifile}" ] || continue
+          zdebug "matching '${ifile}' to '${kern}'"
+          echo "${kdir}/${ifile}"
+          return 0
+        done
+      done
+    done
+  done
+
+  return 1
+}
+
 # arg1: ZFS filesystem
 # prints: nothing
 # returns: 0 if kernels were found, 1 otherwise
 
 find_be_kernels() {
   local fs mnt
-  local kernel kernel_base labels version kernel_records
-  local defaults def_kernel def_kernel_file
+  local kpath ipath kernel_records
 
   fs="${1}"
   if [ -z "${fs}" ]; then
@@ -693,81 +843,46 @@ find_be_kernels() {
   zdebug "fs set to ${fs}"
 
   # Try to mount, just skip the list otherwise
-  if ! mnt="$( mount_zfs "${fs}" )"; then
+  if ! mnt="$( mount_zfs "${fs}" 2>&1 )"; then
     zerror "unable to mount ${fs}"
     return 1
   fi
 
-  # Check if /boot even exists in the environment
-  if [ ! -d "${mnt}/boot" ]; then
-    zdebug "${mnt}/boot not present"
-    umount "${mnt}"
-    return 1
-  fi
-
   # Make sure the kernel list starts fresh
-  kernel_records="${mnt/mnt/kernels}"
+  kernel_records="${mnt%/*}/kernels"
   : > "${kernel_records}"
 
-  # shellcheck disable=SC2012,2086
-  for kernel in $( ls \
-      ${mnt}/boot/{{vm,}linu{x,z},kernel}{,-*} 2>/dev/null | sort -V ); do
-    # Pull basename and validate
-    kernel="${kernel##*/}"
-    [ -e "${mnt}/boot/${kernel}" ] || continue
-    zdebug "found ${mnt}/boot/${kernel}"
+  # Look for kernels and matching initramfs, sorted in version order
+  while read -r kpath; do
+    # Strip mount point from path
+    [ -n "${kpath}" ] || continue;
+    kpath="${kpath#"${mnt}"}"
+    kpath="/${kpath#/}"
 
-    # Kernel "base" extends to first hyphen
-    kernel_base="${kernel%%-*}"
-    # Kernel "version" is everything after base and may be empty
-    version="${kernel#"${kernel_base}"}"
-    version="${version#-}"
-    zdebug "kernel version: ${version}"
-
-    # initramfs images can take many forms, look for a sensible one
-    labels=( "$kernel" )
-    if [ -n "$version" ]; then
-      labels+=( "$version" )
+    if ipath="$( find_be_initramfs "${mnt}${kpath}" )"; then
+      zdebug "found kernel: ${mnt}${kpath}, initramfs ${mnt}${ipath}"
+      ipath="${ipath#"${mnt}"}"
+      ipath="/${ipath#/}"
+      printf "%s\t%s\t%s\n" "${fs}" "${kpath}" "${ipath}" >> "${kernel_records}"
+    else
+      zdebug "kernel ${mnt}${kpath} has no initramfs"
     fi
-
-    local ext pfx lbl i
-    # Use a mess of loops instead better brace expansions to control priorities
-    for ext in {.img,""}{"",.{gz,bz2,xz,lzma,lz4,lzo,zstd}}; do
-      for pfx in initramfs initrd; do
-        for lbl in "${labels[@]}"; do
-          for i in "${pfx}-${lbl}${ext}" "${pfx}${ext}-${lbl}"; do
-            if [ -e "${mnt}/boot/${i}" ]; then
-              zdebug "matching ${i} to ${kernel}"
-              echo "${fs} /boot/${kernel} /boot/${i}" >> "${kernel_records}"
-              break 4
-            fi
-          done
-        done
-      done
-    done
-  done
+  done <<<"$(
+    for k in "${mnt}/boot"/{{vm,}linu{x,z},kernel}{,-*}; do
+      [ -e "${k}" ] && echo "${k}"
+    done | sort -V
+  )"
 
   # No further need for the mount
   umount "${mnt}"
 
-  defaults="$( select_kernel "${fs}" )"
+  # Search was successful if at least one kernel can be selected
+  [ -s "${kernel_records}" ] && select_kernel "${fs}" >/dev/null && return 0
 
-  # shellcheck disable=SC2034
-  IFS=' ' read -r def_fs def_kernel def_initramfs <<<"${defaults}"
-
-  def_kernel_file="${mnt/mnt/default_kernel}"
-
-  # If no default kernel is found, there are no kernels; leave the BE
-  # directory in the same state it would be in had no /boot existed
-  if [ -z "${def_kernel}" ]; then
-    zdebug "no default kernel found for ${fs}"
-    rm -f "${kernel_records}" "${def_kernel_file}"
-    return 1
-  fi
-
-  zdebug "default kernel set to ${def_kernel}"
-  echo "${def_kernel##*/}" > "${def_kernel_file}"
-  return 0
+  # Remove an invalid kernel record if the search failed
+  zerror "failed to find kernels on ${fs}"
+  rm -f "${kernel_records}"
+  return 1
 }
 
 # arg1: ZFS filesystem
@@ -786,8 +901,8 @@ select_kernel() {
 
   kernel_list="$( be_location "${zfsbe}" )/kernels"
 
-  if [ ! -f "${kernel_list}" ]; then
-    zerror "kernel list '${kernel_list}' missing"
+  if [ ! -s "${kernel_list}" ]; then
+    zerror "kernel list '${kernel_list}' missing or empty"
     return 1
   fi
 
@@ -795,18 +910,22 @@ select_kernel() {
   kexec_args="$( tail -1 "${kernel_list}" )"
 
   # If a specific kernel is listed, prefer it when possible
-  specific_kernel="$( zfs get -H -o value org.zfsbootmenu:kernel "${zfsbe}" )"
+  specific_kernel="$( zfs get -H -o value org.zfsbootmenu:kernel "${zfsbe}" 2>/dev/null )"
   if [ "${specific_kernel}" != "-" ]; then
     zdebug "org.zfsbootmenu:kernel set to ${specific_kernel}"
     while read -r spec_kexec_args; do
       local fs kernel initramfs
-      IFS=' ' read -r fs kernel initramfs <<<"${spec_kexec_args}"
+      IFS=$'\t' read -r fs kernel initramfs <<<"${spec_kexec_args}"
       if [[ "${kernel}" =~ ${specific_kernel} ]]; then
         zdebug "matched ${kernel} to ${specific_kernel}"
         kexec_args="${spec_kexec_args}"
-        break
       fi
-    done <<<"$( tac "${kernel_list}" )"
+    done < "${kernel_list}"
+  fi
+
+  if [ -z "${kexec_args}" ]; then
+    zerror "failed to identify kexec arguments for ${fs}"
+    return 1
   fi
 
   zdebug "using kexec args: ${kexec_args}"
@@ -835,7 +954,7 @@ find_root_prefix() {
   zdebug "zfsbe_mnt set to ${zfsbe_mnt}"
 
   # Grab the root prefix from a property if possible
-  if prefix="$( zfs get -H -o value org.zfsbootmenu:rootprefix "${zfsbe_fs}" )"; then
+  if prefix="$( zfs get -H -o value org.zfsbootmenu:rootprefix "${zfsbe_fs}" 2>/dev/null )"; then
     if [ "${prefix}" != "-" ]; then
       zdebug "using org.zfsbootmenu:rootprefix: ${prefix}"
       echo "${prefix}"
@@ -1092,7 +1211,7 @@ rewind_checkpoint() {
         checkpoint="${line#checkpoint: }"
         ;;
     esac
-  done <<<"$( zpool status "${pool}" )"
+  done <<<"$( zpool status "${pool}" 2>/dev/null )"
 
   [ -z "${checkpoint}" ] && return 1
   tput clear
@@ -1142,22 +1261,31 @@ has_resume_device() {
 }
 
 # getopts arguments:
-# -d  prompt countdown/delay
-# -p  prompt with countdown timer (%0.xd)
+# -d  prompt countdown/delay; non-positive values will wait forever
+# -p  prompt with countdown timer (use %0.Xd as a placeholder for time)
 # -m+ message to be printed above the prompt, usable multiple times
 # -r  message to be prefixed with [RETURN] (accept)
 # -e  message to be prefixed with [ESCAPE] (reject)
 #
-# -m, -r, -e are print in the order they are passed into the function
+# -m, -r, -e are printed in the order they are passed to the function
 
 timed_prompt() {
-  local prompt delay message opt OPTIND
+  local prompt delay message infinite opt OPTIND
 
+  infinite=
   while getopts "d:p:m:r:e:" opt; do
     case "${opt}" in
       d)
-        delay="${OPTARG}"
-        [ "${delay}" -gt 0 ] || return 0
+        delay="${OPTARG:-0}"
+        if [ "${delay}" -gt 0 ] >/dev/null 2>&1; then
+          :
+        elif [ "${delay}" -le 0 ] >/dev/null 2>&1; then
+          delay="30"
+          infinite="yes"
+        else
+          zdebug "delay argument for timed_prompt is not numeric"
+          return 0
+        fi
         ;;
       p)
         prompt="${OPTARG}"
@@ -1176,8 +1304,12 @@ timed_prompt() {
     esac
   done
 
-  [ -n "${delay}" ] || delay="30"
-  [ -n "${prompt}" ] || prompt="Press $( colorize green "[RETURN]") or wait $( colorize yellow "%0.${#delay}d" ) seconds to continue"
+  [ "${delay:-0}" -gt 0 ] >/dev/null 2>&1 || delay="30"
+
+  if [ -z "${prompt}" ]; then
+    prompt="Press $( colorize green "[RETURN]") to continue"
+    [ -z "${infinite}" ] && prompt+=" or wait $( colorize yellow "%0.${#delay}d" ) seconds"
+  fi
 
   # Add a blank line between any messages and the prompt
   message+=( "" )
@@ -1206,6 +1338,10 @@ timed_prompt() {
     shift
   done
 
+  local readargs
+  readargs=( -s -N 1 )
+  [ -z "${infinite}" ] && readargs+=( -t 1 )
+
   for (( i=delay; i>0; i-- )); do
     # shellcheck disable=SC2059
     mes="$( printf "${prompt}" "${i}" )"
@@ -1216,7 +1352,7 @@ timed_prompt() {
     echo -ne "${mes}"
 
     # shellcheck disable=SC2162
-    IFS='' read -s -N 1 -t 1 key
+    IFS='' read "${readargs[@]}" key
     # escape key
     if [ "$key" = $'\e' ]; then
       return 1
@@ -1224,6 +1360,9 @@ timed_prompt() {
     elif [ "$key" = $'\x0a' ]; then
       return 0
     fi
+
+    # If delay is infinite, don't let it tick down
+    [ -n "${infinite}" ] && i=$(( i + 1 ))
   done
 
   return 0
@@ -1275,7 +1414,7 @@ resume_prompt() {
 
 	Type $( colorize "red" "DANGEROUS" ) to proceed with the import without allowing
 	ZFSBootMenu to modify your kernel command line. Make sure to
-	add the "noresume" argument yourself if necesary.
+	add the "noresume" argument yourself if necessary.
 
 	Type any other text, or just press enter, to abort.
 
@@ -1357,6 +1496,16 @@ set_rw_pool() {
   fi
   zdebug "pool set to ${pool}"
 
+  if [ -w /sys/module/zfs/parameters/zfs_bclone_enabled ] ; then
+    zdebug "disabling block cloning on writeable pools"
+    echo 0 > /sys/module/zfs/parameters/zfs_bclone_enabled
+  fi
+
+  if [ -w /sys/module/zfs/parameters/zfs_dmu_offset_next_sync ] ; then
+    zdebug "disabling zfs_dmu_offset_next_sync on writeable pools"
+    echo 0 > /sys/module/zfs/parameters/zfs_dmu_offset_next_sync
+  fi
+
   # If force_export is set, skip evaluating if the pool is already read-write
   # shellcheck disable=SC2154
   [ -n "${force_export}" ] || ! is_writable "${pool}" || return 0
@@ -1428,7 +1577,7 @@ be_has_encroot() {
 
   pool="${fs%%/*}"
 
-  if [ "$( zpool list -H -o feature@encryption "${pool}" )" != "active" ]; then
+  if [ "$( zpool list -H -o feature@encryption "${pool}" 2>/dev/null )" != "active" ]; then
     zdebug "feature@encryption not active on ${pool}"
     echo ""
     return 1
@@ -1462,7 +1611,7 @@ be_is_locked() {
 
   if encroot="$( be_has_encroot "${fs}" )"; then
     zdebug "${encroot} discovered as encryption root for ${fs}"
-    keystatus="$( zfs get -H -o value keystatus "${encroot}" )"
+    keystatus="$( zfs get -H -o value keystatus "${encroot}" 2>&1 )"
     zdebug "${encroot} keystatus: ${keystatus}"
     case "${keystatus}" in
       unavailable)
@@ -1492,7 +1641,7 @@ be_keysource() {
   fi
   zdebug "fs set to ${fs}"
 
-  if ! keysrc="$( zfs get -H -o value org.zfsbootmenu:keysource "${fs}" )"; then
+  if ! keysrc="$( zfs get -H -o value org.zfsbootmenu:keysource "${fs}" 2>/dev/null )"; then
     zwarn "failed to read org.zfsbootmenu:keysource on ${fs}"
     echo ""
     return 1
@@ -1591,7 +1740,7 @@ cache_key() {
   fi
 
   relkeyloc=""
-  if ksmount="$(zfs get -o value -H mountpoint "${keysrc}" )"; then
+  if ksmount="$(zfs get -o value -H mountpoint "${keysrc}" 2>/dev/null )"; then
     case "${ksmount}" in
       none|legacy)
         zdebug "no discernable mountpoint for ${keysrc}, using only absolute key path"
@@ -1659,7 +1808,7 @@ cache_key() {
 # NOTE: this function should *not* be called from a subshell
 
 load_key() {
-  local fs encroot key keypath keyformat keylocation keysource
+  local fs encroot key keypath keyformat keylocation keysource hook_envs
 
   fs="${1}"
   if [ -z "${fs}" ]; then
@@ -1669,8 +1818,18 @@ load_key() {
   zdebug "fs set to ${fs}"
 
   # Nothing to do if filesystem is not locked
-  if ! encroot="$( be_is_locked "${fs}" )" || [ -z "$encroot" ]; then
+  if ! encroot="$( be_is_locked "${fs}" )" || [ -z "${encroot}" ]; then
     return 0
+  fi
+
+  # Run load-key hooks, if they exist
+  hook_envs=( ZBM_LOCKED_FS="${fs}" ZBM_ENCRYPTION_ROOT="${encroot}" )
+  if env "${hook_envs[@]}" /libexec/zfsbootmenu-run-hooks "load-key.d"; then
+    # If hooks ran, check if the filesystem has been unlocked
+    if ! be_is_locked "${fs}" >/dev/null; then
+      zdebug "fs ${fs} unlocked by user hooks"
+      return 0
+    fi
   fi
 
   # Default to 0 when unset
@@ -1678,7 +1837,7 @@ load_key() {
   [ -n "${NO_CACHE}" ] || NO_CACHE=0
 
   # If something goes wrong discovering key location, just prompt
-  if ! keylocation="$( zfs get -H -o value keylocation "${encroot}" )"; then
+  if ! keylocation="$( zfs get -H -o value keylocation "${encroot}" 2>/dev/null )"; then
     zdebug "failed to read keylocation on ${encroot}"
     keylocation="prompt"
   fi
@@ -1727,7 +1886,7 @@ load_key() {
   fi
 
   # Otherwise, try to prompt for "passphrase" keys
-  keyformat="$( zfs get -H -o value keyformat "${encroot}" )" || keyformat=""
+  keyformat="$( zfs get -H -o value keyformat "${encroot}" 2>/dev/null )" || keyformat=""
   if [ "${keyformat}" != "passphrase" ]; then
     zdebug "unable to load key with format ${keyformat} for ${encroot}"
     return 1
@@ -1802,10 +1961,16 @@ emergency_shell() {
 
 	EOF
 
+  if [ -f "${BASE}/have_errors" ]; then
+    print_kmsg_logs "err"
+    echo
+    rm "${BASE}/have_errors"
+  fi
+
   command -v efibootmgr >/dev/null 2>&1 && mount_efivarfs "rw" 
 
   # -i (interactive) mode will source $HOME/.bashrc
-  /bin/bash -i
+  ( trap - SIGINT; exec /bin/bash -i )
 
   # shellcheck disable=SC2034
   while read -r skip mp fs skip ; do
@@ -1816,28 +1981,65 @@ emergency_shell() {
   done < /proc/self/mounts
 
   # always remount as read-only
-  mount_efivarfs 
+  mount_efivarfs
 }
 
 # prints: zpool list and zfs property list
 # returns: nothing
 
 zreport() {
-  local ZBMTAG
-  if [ -r "/etc/zbm-commit-hash" ]; then
-    read -r ZBMTAG < /etc/zbm-commit-hash
-    echo -e "ZFSBootMenu version: ${ZBMTAG}\n"
-  fi
-  uname -a
-  echo -e "\n# modinfo"
+  local hook
+
+  colorize white "System Report\n\n"
+
+  (
+    VERSION="unknown"
+    PRETTY_NAME="ZFSBootMenu"
+    UNAME="$( uname -srm )"
+
+    # shellcheck disable=SC1091
+    [ -f /etc/zbm-release ] && source /etc/zbm-release
+
+    if [[ "${VERSION}" =~ dev$ ]]; then
+      VERSION="$( colorize red "${VERSION}" )"
+    else
+      VERSION="$( colorize green "${VERSION}" )"
+    fi
+
+    if [[ "${PRETTY_NAME}" == "ZFSBootMenu" ]]; then
+      PRETTY_NAME="$( colorize orange ZFS )$( colorize lightgray BootMenu )"
+    fi
+
+    echo -e "${PRETTY_NAME} ${VERSION} (${UNAME})"
+  )
+
+  colorize orange "\n>> ZFSBootMenu commandline\n"
+  get_zbm_kcl | kcl_assemble ; echo
+
+  colorize orange "\n>> Enabled hooks\n"
+  for hook in /libexec/hooks/*.d/*; do
+    [ -x "${hook}" ] && echo "* $( colorize green "${hook}")"
+  done
+
+  colorize orange "\n>> Disabled hooks\n"
+  for hook in /libexec/hooks/*.d/*; do
+    [ -f "${hook}" ] || continue
+    [ -x "${hook}" ] && continue
+    echo "* $( colorize red "${hook}")"
+  done
+
+  colorize orange "\n>> ZFS/SPL module information\n"
   echo "$( modinfo -F filename spl ): $( modinfo -F version spl )"
   echo "$( modinfo -F filename zfs ): $( modinfo -F version zfs )"
-  echo -e "\n# zfs version"
+
+  colorize orange "\n>> ZFS version\n"
   zfs version
-  echo -e "\n# zpool list"
+
+  colorize orange "\n>> Imported zpools\n"
   zpool list
-  echo -e "\n# zfs list"
-  zfs list -o name,mountpoint,encroot,keystatus,keylocation,org.zfsbootmenu:keysource
+
+  colorize orange "\n>> ZFS datasets\n"
+  zfs list -o name,mountpoint,canmount,encroot,keystatus,keylocation,org.zfsbootmenu:keysource
 }
 
 # arg1: hook root spec, as <device>//<path>
@@ -1872,13 +2074,18 @@ import_zbm_hooks() {
     return 1
   fi
 
-  for hdir in early-setup.d setup.d teardown.d; do
-    hsrc="${hook_mount}/${hook_path}/${hdir}"
+  for hsrc in "${hook_mount}/${hook_path}"/*; do
     [ -d "${hsrc}" ] || continue
-    mkdir -p "/libexec/${hdir}"
+    hdir="${hsrc##*/}"
+
+    if ! mkdir -p "/libexec/hooks/${hdir}"; then
+      zwarn "failed to create hook directory ${hdir}"
+      continue;
+    fi
+
     for hfile in "${hsrc}"/*; do
       [ -f "${hfile}" ] || continue
-      if ! cp "${hfile}" "/libexec/${hdir}" >/dev/null 2>&1; then
+      if ! cp "${hfile}" "/libexec/hooks/${hdir}" >/dev/null 2>&1; then
         zwarn "failed to copy user hook ${hfile}"
       fi
     done
@@ -1920,6 +2127,36 @@ is_mountpoint() {
   return 1
 }
 
+# arg1: device or dataset name
+# prints: mountpoint if mounted 
+# returns: 0 if the device is mounted, 1 if not
+
+is_mounted() {
+  local mount_path dev path opts
+
+  mount_dev="${1}"
+
+  if [ -z "${mount_dev}" ]; then
+    zerror "mount_dev undefined"
+    return 1
+  fi
+
+  if [ ! -r /proc/self/mounts ]; then
+    zerror "unable to read mount database"
+    return 1
+  fi
+
+  # shellcheck disable=SC2034
+  while read -r dev path opts; do
+    if [ "${dev}" = "${mount_dev}" ]; then
+      echo "${path}"
+      return 0
+    fi
+  done < /proc/self/mounts
+
+  return 1
+}
+
 # args: none
 # prints: nothing
 # returns: 0 if EFI is detected, 1 if not
@@ -1928,7 +2165,6 @@ is_efi_system() {
   [ -d /sys/firmware/efi ] && return 0
   return 1
 }
-
 
 # arg1: 'ro' or 'rw' to mount or remount efivarfs in that desired mode
 # arg2: optional mountpoint
@@ -1952,4 +2188,22 @@ mount_efivarfs() {
     zdebug "mounting '${efivar_location}' '${efivar_state}'"
     mount -t efivarfs efivarfs "${efivar_location}" -o "${efivar_state}"
   fi
+}
+
+# arg1: zfs dataset name
+# returns: 0 if filesystem
+
+is_zfs_filesystem() {
+  local dataset
+
+  dataset="${1}"
+
+  if [ -z "${dataset}" ]; then
+    zerror "dataset undefined"
+    return 1
+  fi
+
+  zfs list -H -o name -t filesystem "${dataset}" >/dev/null 2>&1 && return 0
+
+  return 1
 }

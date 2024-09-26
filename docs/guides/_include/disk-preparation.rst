@@ -6,6 +6,8 @@ Wipe partitions
 
 .. code-block:: bash
 
+  zpool labelclear -f "$POOL_DISK"
+
   wipefs -a "$POOL_DISK"
   wipefs -a "$BOOT_DISK"
 

@@ -45,8 +45,8 @@ if ! is_snapshot "${selected}" && ! is_writable "${pool}" ; then
   fi
 fi
 
-reset
-clear
+tput reset
+tput clear
 
 if ! mountpoint="$( allow_rw=yes mount_zfs "${selected}" )"; then
   zerror "failed to mount ${selected}"
@@ -117,6 +117,9 @@ fi
 
 notices+=( "\n$(colorize white "*" ) $( colorize orange "/tmp" ) is mounted $( colorize red "read/write")" )
 echo -e "${notices[*]}\n"
+
+# will point to a script that doesn't exist in the chroot
+unset PROMPT_COMMAND
 
 # regardless of shell, set PS1
 # shellcheck disable=SC2086

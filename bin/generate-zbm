@@ -4,10 +4,10 @@
 use strict;
 use warnings;
 
-our $VERSION = '2.2.0';
+our $VERSION = '2.3.0+dev';
 
 use Getopt::Long qw(:config no_ignore_case auto_version);
-use Pod::Usage qw(pod2usage);
+use Pod::Usage   qw(pod2usage);
 use File::Basename;
 use File::Temp qw(tempfile tempdir);
 use File::Copy;
@@ -15,6 +15,7 @@ use File::stat;
 use File::Path qw(make_path remove_tree);
 use File::Glob qw(:globally :nocase);
 use Sort::Versions;
+use bigint qw(hex);
 
 use Pod::Usage qw(pod2usage);
 
@@ -53,7 +54,7 @@ BEGIN {
 
 my ( %runConf, %config );
 
-$runConf{config} = "/etc/zfsbootmenu/config.yaml";
+$runConf{config}  = "/etc/zfsbootmenu/config.yaml";
 $runConf{bootdir} = "/boot";
 
 GetOptions(
@@ -497,85 +498,6 @@ if ( enabled $config{Components} ) {
   printf "Created kernel image %s\n",    $kernel_target;
 }
 
-# Generate syslinux.cfg, requires components to be built
-if ( enabled $config{Components}{syslinux} ) {
-  my $warning = <<"EOF";
-
-DEPRECATION WARNING: syslinux support in generate-zbm is deprecated.
-  Support will be removed in the next release.
-
-  As an alternative: consider one of the following two options:
-
-  1. Set `Components.Versions` to `false` in the ZFSBootMenu configuration and
-     maintain a static syslinux configuration.
-
-  2. Use the contrib/syslinux-update.sh script in the ZFSBootMenu repository
-     as a post-image hook for generate-zbm(5).
-
-EOF
-  print $warning;
-
-  my $glob    = sprintf( "%s/%s-*", $config{Components}{ImageDir}, $runConf{kernel_prefix} );
-  my @listing = sort versioncmp glob($glob);
-
-  # Filter EFI files, in case they're in the same directory
-  my @components;
-  foreach my $entry (@listing) {
-    if ( $entry =~ /EFI$/i ) {
-      next;
-    }
-    push( @components, $entry );
-  }
-
-  $runConf{syslinux_temp} = join( '/', $tempdir, 'syslinux.conf' );
-  open CFG, '>', $runConf{syslinux_temp};
-
-  my $header = <<'EOF';
-UI menu.c32
-PROMPT 0
-
-MENU TITLE Boot Menu
-TIMEOUT 50
-EOF
-
-  print CFG $header;
-
-  my $add_default = 1;
-  while (@components) {
-    my $entry = pop(@components);
-
-    my $directory = dirname($entry);
-
-    # Strip the mountpoint prefix out to generate a correct path based on /
-    $directory =~ s/\Q$config{Global}{BootMountPoint}//;
-
-    my $kernel = basename($entry);
-    my ( undef, $version ) = split( '-', $kernel );
-    my $label      = "ZFSBootMenu-$version";
-    my $menu_label = "ZFSBootMenu $version";
-
-    if ($add_default) {
-      print CFG "DEFAULT $label\n\n";
-      $add_default--;
-    }
-
-    my $entry_text = <<"EOF";
-LABEL $label
-MENU LABEL $menu_label
-KERNEL $directory/$kernel
-INITRD $directory/initramfs-$version.img
-APPEND $runConf{cmdline}
-
-EOF
-    print CFG $entry_text;
-
-  }
-  close CFG;
-
-  make_path dirname( $config{Components}{syslinux}{Config} );
-  safeCopy( $runConf{syslinux_temp}, $config{Components}{syslinux}{Config} ) or exit 1;
-}
-
 if ( nonempty $config{Global}{PostHooksDir} and -d $config{Global}{PostHooksDir} ) {
   while ( my $hook = <$config{Global}{PostHooksDir}/*> ) {
     next unless -x $hook;
@@ -713,8 +635,32 @@ EOF
   return $namever;
 }
 
+# Given a sections size, calculate where the next section should be placed, 
+# while respecting the stub alignment value
+sub increaseBundleOffset {
+  my ( $step, $offset, $alignment ) = @_;
+  $offset += int( ( $step + $alignment - 1 ) / $alignment * $alignment );
+  Log( "New offset is: " . hex($offset) );
+  return $offset;
+}
+
+# Adds the commands necessary to put another section into the EFI bundle, 
+# and then calculates where the bundle offset has been moved to
+sub addBundleSection {
+  my ( $cmds, $secname, $filename, $offset, $alignment ) = @_;
+
+  my $hex_offset = sprintf( "0x%X", $offset );
+  push( @$cmds, ( "--add-section", "$secname=\"$filename\"" ), qw(--change-section-vma), ("$secname=\"$hex_offset\""),
+  );
+
+  my $sb = stat($filename);
+  return increaseBundleOffset( $sb->size, $offset, $alignment );
+
+}
+
 # Creates a UEFI bundle from an initramfs and kernel
 # Returns the path to the bundle or dies with an error
+
 sub createUEFIBundle {
   my ( $imagedir, $kernel, $initramfs ) = @_;
 
@@ -734,10 +680,11 @@ sub createUEFIBundle {
       exit 1;
     }
   } else {
+
     # For now, default stub locations are x86_64 only
     my @uefi_stub_defaults = qw(
-      /usr/lib/gummiboot/linuxx64.efi.stub
       /usr/lib/systemd/boot/efi/linuxx64.efi.stub
+      /usr/lib/gummiboot/linuxx64.efi.stub
     );
 
     foreach my $stubloc (@uefi_stub_defaults) {
@@ -756,17 +703,55 @@ sub createUEFIBundle {
     }
   }
 
-  my @cmd = qw(objcopy);
+  my ( $uki_alignment, $uki_offset );
 
-  # Add os-release, if it exists
-  if ( -f "/etc/os-release" ) {
-    push( @cmd,
-      qw(--add-section .osrel=/etc/os-release),
-      qw(--change-section-vma .osrel=0x20000)
-    );
+  # Determine stub alignment, most likely 4096
+  my @cmd = qw(objdump -p);
+  push( @cmd, $uefi_stub );
+
+  my @output = execute(@cmd);
+  my $status = pop(@output);
+  if ( $status eq 0 ) {
+    foreach my $line (@output) {
+      if ( $line =~ m/SectionAlignment\s+(\d+)/ ) {
+        Log( "Alignment is: " . hex($1) );
+        $uki_alignment = hex($1);
+      }
+    }
+  } else {
+    print "Unable to determine stub alignment!\n";
+    exit 1;
   }
 
-  # Add cmdline, if it exists
+  # Determine initial UKI offset value by grabbing the size and VMA of 
+  # the last section of the EFI stub.
+  @cmd = qw(objdump -w -h);
+  push( @cmd, $uefi_stub );
+
+  @output = execute(@cmd);
+  $status = pop(@output);
+  if ( $status eq 0 ) {
+    my @sizes = split( /\s+/, @output[ scalar @output - 1 ] );
+
+    my $size = "0x" . $sizes[3];
+    my $vma  = "0x" . $sizes[4];
+    my $sum  = hex($size) + hex($vma);
+
+    $uki_offset = increaseBundleOffset( $sum, 0, $uki_alignment );
+    Log( "Initial offset is: " . hex($uki_offset) );
+  } else {
+    print "Unable to determine initial stub offset!\n";
+    exit 1;
+  }
+
+  @cmd = qw(objcopy);
+
+  my ( $hex_offset, $sb );
+
+  if ( -f "/etc/os-release" ) {
+    $uki_offset = addBundleSection( \@cmd, ".osrel", "/etc/os-release", $uki_offset, $uki_alignment );
+  }
+
   if ( nonempty $runConf{cmdline} ) {
     my $cmdline = join( '/', $imagedir, "cmdline.txt" );
 
@@ -774,27 +759,27 @@ sub createUEFIBundle {
     print $fh $runConf{cmdline};
     close($fh);
 
-    push( @cmd,
-      ( "--add-section", ".cmdline=\"$cmdline\"" ),
-      qw(--change-section-vma .cmdline=0x30000)
-    );
+    $uki_offset = addBundleSection( \@cmd, ".cmdline", $cmdline, $uki_offset, $uki_alignment );
   }
 
-  # Mandatory kernel and initramfs images
-  push( @cmd, (
-    ( "--add-section", ".linux=\"$kernel\"" ),
-    qw(--change-section-vma .linux=0x2000000),
-    ( "--add-section", ".initrd=\"$initramfs\"" ),
-    qw(--change-section-vma .initrd=0x3000000)
-  ));
+  if ( nonempty $config{EFI}{SplashImage} and -f $config{EFI}{SplashImage} ) {
+    # only supported with systemd-boot's efistub,
+    # but gummiboot doesn't care if the section exists
+    $uki_offset = addBundleSection( \@cmd, ".splash", $config{EFI}{SplashImage}, $uki_offset, $uki_alignment );
+  }
+
+  $uki_offset = addBundleSection( \@cmd, ".initrd", $initramfs, $uki_offset, $uki_alignment );
+
+  # Add the kernel last, so that it can decompress without overflowing other sections
+  $uki_offset = addBundleSection( \@cmd, ".linux",  $kernel,    $uki_offset, $uki_alignment );
 
   push( @cmd, ( $uefi_stub, $output_file ) );
 
   my $command = join( ' ', @cmd );
   Log("Executing: $command");
 
-  my @output = execute(@cmd);
-  my $status = pop(@output);
+  @output = execute(@cmd);
+  $status = pop(@output);
   if ( $status eq 0 ) {
     foreach my $line (@output) {
       Log($line);

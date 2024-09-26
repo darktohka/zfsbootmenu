@@ -1,14 +1,15 @@
-.. image:: logos/Logo_TextOnly_Color.svg
+.. image:: _static/logo-header.svg
    :alt: ZFSBootMenu logo
    :align: center
+   :class: dark-light
 
 .. raw:: html
 
   <br>
   <div class="dl-links">
-    <a class="dl-button" href="https://get.zfsbootmenu.org/efi"><i class="icon fa-download"></i> x86_64 EFI Image</a>
-    <a class="dl-button" href="https://get.zfsbootmenu.org/efi/recovery"><i class="icon fa-download"></i> x86_64 Recovery Image</a>
-    <a class="dl-button" href="https://github.com/zbm-dev/zfsbootmenu"><i class="icon icon-github"></i> View on GitHub</a>
+    <a class="dl-button" href="https://get.zfsbootmenu.org/efi"><i class="fa-solid fa-download"></i> x86_64 EFI Image</a>
+    <a class="dl-button" href="https://get.zfsbootmenu.org/efi/recovery"><i class="fa-solid fa-download"></i> x86_64 Recovery Image</a>
+    <a class="dl-button" href="https://github.com/zbm-dev/zfsbootmenu"><i class="fa-brands fa-github"></i> View on GitHub</a>
   </div>
   <br>
   <div class="dl-links">
@@ -40,19 +41,38 @@
   man/zbm-kcl.8
 
 .. toctree::
-  :caption: Guides
+  :caption: General Information
   :maxdepth: 3
   :titlesonly:
   :includehidden:
   :hidden:
 
-  guides/general
+  general/binary-releases
+  general/bootenvs-and-you
+  general/container-building
+  general/mkinitcpio
+  general/native-encryption
+  general/portable
+  general/remote-access
+  general/tailscale
+  general/uefi-booting
+  general/grub-migration
+  general/mdraid-esp
+
+.. toctree::
+  :caption: Installation Guides
+  :maxdepth: 3
+  :titlesonly:
+  :includehidden:
+  :hidden:
+
   guides/void-linux
   guides/alpine
+  guides/chimera
   guides/debian
-  guides/ubuntu
   guides/fedora
   guides/opensuse
+  guides/ubuntu
   guides/third-party
 
 .. toctree::
@@ -81,7 +101,7 @@ In essence, ZFSBootMenu is a small, self-contained Linux system that knows how t
 images within ZFS filesystems. When a suitable kernel and initramfs are identified (either through an automatic process
 or direct user selection), ZFSBootMenu launches that kernel using the ``kexec`` command.
 
-.. image:: /media/v2.1.0-multi-be.png
+.. image:: _static/screenshot.png
   :alt: ZFSBootMenu screenshot
   :align: center
 
@@ -150,13 +170,12 @@ configurations.
 Easily Deployed and Extensively Configurable
 --------------------------------------------
 
-Each release includes pre-generated boot images, based on Void Linux, that should work for the majority of users. Images
-are distributed for ``x86_64`` platforms both as monolithic UEFI applications as well a separate kernel an initramfs
-image that are suitable for use on both UEFI and legacy BIOS systems. Users of other platforms or that require custom
-configurations can build local images, running the ZFSBootMenu image generator either in a host installation or in the
-controlled environment of an OCI (Docker) container.
+Each release includes pre-generated boot images, based on Void Linux, that should work for the majority of users. These
+images are available for ``x86_64`` UEFI and legacy BIOS systems in the form of an EFI executable or a kernel and
+initramfs. Users of other platforms or that require custom configurations can build local images, running the
+ZFSBootMenu image generator either in a host installation or in the controlled environment of an OCI (Docker) container.
 
-Modern UEFI platforms provide a wide range of :doc:`options for launching ZFSBootmenu </guides/general/uefi-booting>`.
+Modern UEFI platforms provide a wide range of :doc:`options for launching ZFSBootmenu </general/uefi-booting>`.
 For legacy BIOS systems, ``syslinux`` is a convenient choice. A
 :doc:`syslinux guide for Void Linux </guides/void-linux/syslinux-mbr>` describes the ``syslinux``
 installation and configuration process in the context of a broader Void Linux installation.
@@ -187,7 +206,7 @@ an EFI stub loader, which is typically included with
 
 Most or all of these software components may be available as packages in your distribution.
 
-Locally created ZFSBootMenu images use your your regular system kernel, ZFS drivers and user-space utilities. The
+Locally created ZFSBootMenu images use your regular system kernel, ZFS drivers and user-space utilities. The
 ZFSBootMenu image is constructed using standard Linux initramfs generators. ZFSBootMenu is known to work and is
 explicitly supported with:
 
@@ -215,7 +234,7 @@ Building in a Container
 The official ZFSBootMenu release images are built in a standard Void Linux OCI container that provides a predictable
 environment that is known to be supported with ZFSBootMenu. The container entrypoint provides full access to all of the
 configurability of ZFSBootMenu, and a helper script simplifies the process or running the container and managing the
-images that it produces. The :doc:`ZFSBootMenu container guide </guides/general/container-building>` provides a detailed
+images that it produces. The :doc:`ZFSBootMenu container guide </general/container-building>` provides a detailed
 description of the containerized build process as well as a straightforward example of local image management using the
 helper script.
 
@@ -224,7 +243,7 @@ ZFS Boot Environments
 
 The concept of a "boot environment" is very loosely defined in ZFSBootMenu. Fundamentally, ZFSBootMenu treats any
 filesystem that appears to be an operating system root and contains an identifiable Linux kernel and initramfs as a boot
-environment. A :doc:`primer </guides/general/bootenvs-and-you>` provides more details about the identification process.
+environment. A :doc:`primer </general/bootenvs-and-you>` provides more details about the identification process.
 
 Command-Line Arguments
 ~~~~~~~~~~~~~~~~~~~~~~

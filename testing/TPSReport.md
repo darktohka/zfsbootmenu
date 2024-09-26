@@ -213,6 +213,10 @@ of the kernel list. That BE should be selected when entering the list.
 - [ ] Pressing the left/right arrow keys moves to the next/previous screen shown
   in the header. Screens will not wrap around.
 
+- [ ] When booting a test VM with GTK output and efifb, the font will be resized
+  to change the apparent resolution of the console. Successful font changes are
+  logged via `zinfo()`.
+
 ## General Testing
 
 - [ ] If every encryption root specifies an `org.zfsbootmenu:keysource`
@@ -251,6 +255,14 @@ of the kernel list. That BE should be selected when entering the list.
   in GTK mode. This can be verified by dropping to the recovery shell and typing
   qwerty.
 
+- [ ] User hooks are installed from `$zfsbootmenu_hook_root` as defined in the
+  dracut or mkinitcpio configuration used by `generate-zbm`.
+
+- [ ] Any hooks installed in a ZFSBootMenu image execute at expected points.
+
+- [ ] Installed hooks cam be properly skipped by specifying their names in the
+  `zbm.skip_hooks` kernel command-line parameter.
+
 ## Recovery Shell and SSH Access
 
 - [ ] Basic tab completion for some internal functions is available in the
@@ -266,6 +278,11 @@ of the kernel list. That BE should be selected when entering the list.
 
     - Until the running instance is stopped, the new invocation will spin with
       a timed message until it succeeds or the user cancels the attempt.
+
+- [ ] In the recovery shell, in a recovery image, verify networking:
+    - `dhclient` should successfully configure a network interface.
+    - `curl` should successfully retrieve https://get.zfsboot.menu/efi
+    - `mbuffer -I 1234` should start and listen on port 1234, accepting traffic
 
 ## OS-Specific Image Creation
 

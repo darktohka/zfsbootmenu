@@ -3,6 +3,13 @@ Configure Live Environment
 
 .. include:: ../_include/os-release.rst
 
+Configure Networking
+~~~~~~~~~~~~~~~~~~~~
+
+.. code-block::
+
+  setup-interfaces -r
+
 Add package repositories
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -19,7 +26,7 @@ Setup additional tools
 
 .. code-block::
 
-  apk add zfs sgdisk wipefs
+  apk add zfs zfs-scripts sgdisk wipefs
   modprobe zfs
 
 .. include:: ../_include/zgenhostid.rst
